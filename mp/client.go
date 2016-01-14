@@ -11,7 +11,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -19,10 +18,25 @@ import (
 	wechatjson "github.com/chanxuehong/wechat/json"
 )
 
-// 微信公众号"主动"请求功能的基本封装.
-type WechatClient struct {
-	TokenServer
+type Client struct {
+	AccessTokenServer
 	HttpClient *http.Client
+}
+
+// 创建一个新的 Client.
+//  如果 clt == nil 则默认用 http.DefaultClient
+func NewClient(srv AccessTokenServer, clt *http.Client) *Client {
+	if srv == nil {
+		panic("nil AccessTokenServer")
+	}
+	if clt == nil {
+		clt = http.DefaultClient
+	}
+
+	return &Client{
+		AccessTokenServer: srv,
+		HttpClient:        clt,
+	}
 }
 
 // 用 encoding/json 把 request marshal 为 JSON, 放入 http 请求的 body 中,
@@ -31,9 +45,12 @@ type WechatClient struct {
 //  NOTE:
 //  1. 一般不用调用这个方法, 请直接调用高层次的封装方法;
 //  2. 最终的 URL == incompleteURL + access_token;
-//  3. response 要求是 struct 的指针, 并且该 struct 拥有属性:
-//     ErrCode int `json:"errcode"` (可以是直接属性, 也可以是匿名属性里的属性)
-func (clt *WechatClient) PostJSON(incompleteURL string, request interface{}, response interface{}) (err error) {
+//  3. response 格式有要求, 要么是 *Error, 要么是下面结构体的指针(注意 Error 必须是第一个 Field):
+//      struct {
+//          Error
+//          ...
+//      }
+func (clt *Client) PostJSON(incompleteURL string, request interface{}, response interface{}) (err error) {
 	buf := textBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer textBufferPool.Put(buf)
@@ -66,27 +83,23 @@ RETRY:
 		return
 	}
 
-	// 请注意:
-	// 下面获取 ErrCode 的代码不具备通用性!!!
-	//
-	// 因为本 SDK 的 response 都是
-	//  struct {
-	//    Error
-	//    XXX
-	//  }
-	// 的结构, 所以用下面简单的方法得到 ErrCode.
-	//
-	// 如果你是直接调用这个函数, 那么要根据你的 response 数据结构修改下面的代码.
-	responseStructValue := reflect.ValueOf(response).Elem()
-	ErrCode := responseStructValue.FieldByName("ErrCode").Int()
+	var ErrorStructValue reflect.Value // Error
 
-	switch ErrCode {
+	// 下面的代码对 response 有特定要求, 见此函数 NOTE
+	responseStructValue := reflect.ValueOf(response).Elem()
+	if v := responseStructValue.Field(0); v.Kind() == reflect.Struct {
+		ErrorStructValue = v
+	} else {
+		ErrorStructValue = responseStructValue
+	}
+
+	switch ErrCode := ErrorStructValue.Field(0).Int(); ErrCode {
 	case ErrCodeOK:
 		return
-	case ErrCodeInvalidCredential, ErrCodeTimeout:
-		ErrMsg := responseStructValue.FieldByName("ErrMsg").String()
-		log.Println("wechat/mp.PostJSON: RETRY, err_code:", ErrCode, ", err_msg:", ErrMsg)
-		log.Println("wechat/mp.PostJSON: RETRY, current token:", token)
+	case ErrCodeInvalidCredential, ErrCodeAccessTokenExpired:
+		ErrMsg := ErrorStructValue.Field(1).String()
+		LogInfoln("[WECHAT_RETRY] err_code:", ErrCode, ", err_msg:", ErrMsg)
+		LogInfoln("[WECHAT_RETRY] current token:", token)
 
 		if !hasRetried {
 			hasRetried = true
@@ -94,12 +107,12 @@ RETRY:
 			if token, err = clt.TokenRefresh(); err != nil {
 				return
 			}
-			log.Println("wechat/mp.PostJSON: RETRY, new token:", token)
+			LogInfoln("[WECHAT_RETRY] new token:", token)
 
 			responseStructValue.Set(reflect.New(responseStructValue.Type()).Elem())
 			goto RETRY
 		}
-		log.Println("wechat/mp.PostJSON: RETRY fallthrough, current token:", token)
+		LogInfoln("[WECHAT_RETRY] fallthrough, current token:", token)
 		fallthrough
 	default:
 		return
@@ -111,9 +124,12 @@ RETRY:
 //  NOTE:
 //  1. 一般不用调用这个方法, 请直接调用高层次的封装方法;
 //  2. 最终的 URL == incompleteURL + access_token;
-//  3. response 要求是 struct 的指针, 并且该 struct 拥有属性:
-//     ErrCode int `json:"errcode"` (可以是直接属性, 也可以是匿名属性里的属性)
-func (clt *WechatClient) GetJSON(incompleteURL string, response interface{}) (err error) {
+//  3. response 格式有要求, 要么是 *Error, 要么是下面结构体的指针(注意 Error 必须是第一个 Field):
+//      struct {
+//          Error
+//          ...
+//      }
+func (clt *Client) GetJSON(incompleteURL string, response interface{}) (err error) {
 	token, err := clt.Token()
 	if err != nil {
 		return
@@ -137,27 +153,23 @@ RETRY:
 		return
 	}
 
-	// 请注意:
-	// 下面获取 ErrCode 的代码不具备通用性!!!
-	//
-	// 因为本 SDK 的 response 都是
-	//  struct {
-	//    Error
-	//    XXX
-	//  }
-	// 的结构, 所以用下面简单的方法得到 ErrCode.
-	//
-	// 如果你是直接调用这个函数, 那么要根据你的 response 数据结构修改下面的代码.
-	responseStructValue := reflect.ValueOf(response).Elem()
-	ErrCode := responseStructValue.FieldByName("ErrCode").Int()
+	var ErrorStructValue reflect.Value // Error
 
-	switch ErrCode {
+	// 下面的代码对 response 有特定要求, 见此函数 NOTE
+	responseStructValue := reflect.ValueOf(response).Elem()
+	if v := responseStructValue.Field(0); v.Kind() == reflect.Struct {
+		ErrorStructValue = v
+	} else {
+		ErrorStructValue = responseStructValue
+	}
+
+	switch ErrCode := ErrorStructValue.Field(0).Int(); ErrCode {
 	case ErrCodeOK:
 		return
-	case ErrCodeInvalidCredential, ErrCodeTimeout:
-		ErrMsg := responseStructValue.FieldByName("ErrMsg").String()
-		log.Println("wechat/mp.GetJSON: RETRY, err_code:", ErrCode, ", err_msg:", ErrMsg)
-		log.Println("wechat/mp.GetJSON: RETRY, current token:", token)
+	case ErrCodeInvalidCredential, ErrCodeAccessTokenExpired:
+		ErrMsg := ErrorStructValue.Field(1).String()
+		LogInfoln("[WECHAT_RETRY] err_code:", ErrCode, ", err_msg:", ErrMsg)
+		LogInfoln("[WECHAT_RETRY] current token:", token)
 
 		if !hasRetried {
 			hasRetried = true
@@ -165,12 +177,12 @@ RETRY:
 			if token, err = clt.TokenRefresh(); err != nil {
 				return
 			}
-			log.Println("wechat/mp.GetJSON: RETRY, new token:", token)
+			LogInfoln("[WECHAT_RETRY] new token:", token)
 
 			responseStructValue.Set(reflect.New(responseStructValue.Type()).Elem())
 			goto RETRY
 		}
-		log.Println("wechat/mp.GetJSON: RETRY fallthrough, current token:", token)
+		LogInfoln("[WECHAT_RETRY] fallthrough, current token:", token)
 		fallthrough
 	default:
 		return

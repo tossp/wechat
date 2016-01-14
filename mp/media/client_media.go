@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -20,28 +19,34 @@ import (
 )
 
 // 下载多媒体到文件.
-//  请注意，视频文件不支持下载
-func (clt *Client) DownloadMedia(mediaId, filepath string) (err error) {
+//  请注意, 视频文件不支持下载
+func (clt *Client) DownloadMedia(mediaId, filepath string) (written int64, err error) {
 	file, err := os.Create(filepath)
 	if err != nil {
 		return
 	}
-	defer file.Close()
+	defer func() {
+		file.Close()
+		if err != nil {
+			os.Remove(filepath)
+		}
+	}()
 
 	return clt.downloadMediaToWriter(mediaId, file)
 }
 
 // 下载多媒体到 io.Writer.
-//  请注意，视频文件不支持下载
-func (clt *Client) DownloadMediaToWriter(mediaId string, writer io.Writer) error {
+//  请注意, 视频文件不支持下载
+func (clt *Client) DownloadMediaToWriter(mediaId string, writer io.Writer) (written int64, err error) {
 	if writer == nil {
-		return errors.New("nil writer")
+		err = errors.New("nil writer")
+		return
 	}
 	return clt.downloadMediaToWriter(mediaId, writer)
 }
 
 // 下载多媒体到 io.Writer.
-func (clt *Client) downloadMediaToWriter(mediaId string, writer io.Writer) (err error) {
+func (clt *Client) downloadMediaToWriter(mediaId string, writer io.Writer) (written int64, err error) {
 	token, err := clt.Token()
 	if err != nil {
 		return
@@ -59,13 +64,13 @@ RETRY:
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode != http.StatusOK {
-		return fmt.Errorf("http.Status: %s", httpResp.Status)
+		err = fmt.Errorf("http.Status: %s", httpResp.Status)
+		return
 	}
 
 	ContentType, _, _ := mime.ParseMediaType(httpResp.Header.Get("Content-Type"))
 	if ContentType != "text/plain" && ContentType != "application/json" { // 返回的是媒体流
-		_, err = io.Copy(writer, httpResp.Body)
-		return
+		return io.Copy(writer, httpResp.Body)
 	}
 
 	// 返回的是错误信息
@@ -77,9 +82,9 @@ RETRY:
 	switch result.ErrCode {
 	case mp.ErrCodeOK:
 		return // 基本不会出现
-	case mp.ErrCodeInvalidCredential, mp.ErrCodeTimeout: // 失效(过期)重试一次
-		log.Println("wechat/mp/media.downloadMediaToWriter: RETRY, err_code:", result.ErrCode, ", err_msg:", result.ErrMsg)
-		log.Println("wechat/mp/media.downloadMediaToWriter: RETRY, current token:", token)
+	case mp.ErrCodeInvalidCredential, mp.ErrCodeAccessTokenExpired: // 失效(过期)重试一次
+		mp.LogInfoln("[WECHAT_RETRY] err_code:", result.ErrCode, ", err_msg:", result.ErrMsg)
+		mp.LogInfoln("[WECHAT_RETRY] current token:", token)
 
 		if !hasRetried {
 			hasRetried = true
@@ -87,12 +92,12 @@ RETRY:
 			if token, err = clt.TokenRefresh(); err != nil {
 				return
 			}
-			log.Println("wechat/mp/media.downloadMediaToWriter: RETRY, new token:", token)
+			mp.LogInfoln("[WECHAT_RETRY] new token:", token)
 
 			result = mp.Error{}
 			goto RETRY
 		}
-		log.Println("wechat/mp/media.downloadMediaToWriter: RETRY fallthrough, current token:", token)
+		mp.LogInfoln("[WECHAT_RETRY] fallthrough, current token:", token)
 		fallthrough
 	default:
 		err = &result
@@ -102,7 +107,7 @@ RETRY:
 
 // 创建图文消息素材.
 func (clt *Client) CreateNews(articles []Article) (info *MediaInfo, err error) {
-	if len(articles) == 0 {
+	if len(articles) <= 0 {
 		err = errors.New("图文素材是空的")
 		return
 	}
@@ -123,7 +128,7 @@ func (clt *Client) CreateNews(articles []Article) (info *MediaInfo, err error) {
 	}
 
 	incompleteURL := "https://api.weixin.qq.com/cgi-bin/media/uploadnews?access_token="
-	if err = clt.PostJSON(incompleteURL, &request, &result); err != nil {
+	if err = ((*mp.Client)(clt)).PostJSON(incompleteURL, &request, &result); err != nil {
 		return
 	}
 
@@ -160,7 +165,7 @@ func (clt *Client) CreateVideo(mediaId, title, description string) (info *MediaI
 	}
 
 	incompleteURL := "https://api.weixin.qq.com/cgi-bin/media/uploadvideo?access_token="
-	if err = clt.PostJSON(incompleteURL, &request, &result); err != nil {
+	if err = ((*mp.Client)(clt)).PostJSON(incompleteURL, &request, &result); err != nil {
 		return
 	}
 

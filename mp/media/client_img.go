@@ -51,7 +51,13 @@ func (clt *Client) uploadImagePermanentFromReader(filename string, reader io.Rea
 	}
 
 	incompleteURL := "https://api.weixin.qq.com/cgi-bin/media/uploadimg?access_token="
-	if err = clt.UploadFromReader(incompleteURL, "buffer", filename, reader, "", nil, &result); err != nil {
+	fields := []mp.MultipartFormField{{
+		ContentType: 0,
+		FieldName:   "buffer",
+		FileName:    filename,
+		Value:       reader,
+	}}
+	if err = ((*mp.Client)(clt)).PostMultipartForm(incompleteURL, fields, &result); err != nil {
 		return
 	}
 
